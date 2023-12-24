@@ -1,10 +1,10 @@
 from aiogram.types import ReplyKeyboardMarkup
 
-
 back_message = '👈 Назад'
 all_right_message = '✅ Все верно'
 cancel_message = '🚫 Отменить'
 confirm_message = '✅ Подтвердить заказ'
+
 
 def back_markup():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
@@ -33,4 +33,3 @@ def submit_markup():
     markup.row(cancel_message, all_right_message)
 
     return markup
-

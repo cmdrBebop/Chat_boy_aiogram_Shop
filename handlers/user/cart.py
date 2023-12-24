@@ -1,4 +1,5 @@
 import logging
+import requests
 
 from aiocryptopay import AioCryptoPay
 from aiogram import types
@@ -12,7 +13,7 @@ from aiogram.types import (
 from aiogram.types.chat import ChatActions
 from aiogram.utils.markdown import hlink
 
-from data.config import CRYPTO_PAY_TOKEN, ADMINS
+from data.config import CRYPTO_PAY_TOKEN, ADMINS, MINIMAL_CART, FREE_DELIVERY_THRESHOLD, DELIVERY_COST
 from filters import IsUser
 from keyboards.default.markups import *
 from keyboards.inline.payment import *
@@ -104,7 +105,8 @@ async def process_checkout(message: Message, state: FSMContext):
 
 
 async def checkout(message, state):
-    answer = ''
+    answer = f'<b>Заказ только от {MINIMAL_CART}</b>\n'
+    answer += f'Доставка {DELIVERY_COST}₽, а от {FREE_DELIVERY_THRESHOLD}₽ бесплатно\n\n'
     total_price = 0
 
     async with state.proxy() as data:
@@ -112,9 +114,14 @@ async def checkout(message, state):
             tp = count_in_cart * price
             answer += f'<b>{title}</b> * {count_in_cart}шт. = {tp}₽\n'
             total_price += tp
+        if total_price < FREE_DELIVERY_THRESHOLD:
+            answer += f'<b>Доставка</b> * 1 шт. = {DELIVERY_COST}₽\n'
+            total_price += DELIVERY_COST
 
-    await message.answer(f'{answer}\nОбщая сумма заказа: {total_price}₽.',
-                         reply_markup=check_markup())
+    if total_price < MINIMAL_CART:
+        await message.answer(f'{answer}\nОбщая сумма заказа: {total_price}₽.')
+    else:
+        await message.answer(f'{answer}\nОбщая сумма заказа: {total_price}₽.', reply_markup=check_markup())
 
 
 @dp.message_handler(IsUser(),
@@ -211,17 +218,27 @@ async def process_confirm(message: Message, state: FSMContext):
         cid = message.chat.id
         products = [idx + '=' + str(quantity)
                     for idx, quantity in db.fetchall('''SELECT idx, quantity FROM cart
-        WHERE cid=?''', (cid,))]
+                WHERE cid=?''', (cid,))]
 
-        total_amount = 0
+        total_amount = 0  # rub
+        for i in data['products'].values():
+            total_amount += i[1] * i[2]
 
-        # db.query('INSERT INTO orders VALUES (?, ?, ?, ?)',
-        #          (cid, data['name'], data['address'], ' '.join(products)))
-        # db.query('DELETE FROM cart WHERE cid=?', (cid,))
+        delivery_cost = DELIVERY_COST
+        if total_amount >= FREE_DELIVERY_THRESHOLD:
+            delivery_cost = 0
+        total_amount += delivery_cost
+
+        currency_data = requests.get('https://www.cbr-xml-daily.ru/daily_json.js').json()
+        dollar_total_amount = round(total_amount / float(currency_data['Valute']['USD']['Value']), 2)
+
+        db.query('INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?)',
+                 (cid, data['name'], data['address'], ' '.join(products), False, dollar_total_amount))
 
         await message.answer(
             'Ваш заказ сформирован 🚀\nИмя: <b>' + data[
-                'name'] + '</b>\nАдрес: <b>' + data['address'] + '</b>',
+                'name'] + '</b>\nАдрес: <b>' + data[
+                'address'] + '</b>' + f"\nСумма {dollar_total_amount}$ по курсу {float(currency_data['Valute']['USD']['Value'])}\n",
             reply_markup=markup)
         await message.answer(
             '<b>💳 Выберите способ пополнения:</b>',
@@ -229,27 +246,15 @@ async def process_confirm(message: Message, state: FSMContext):
         )
 
     await state.finish()
-    # await CryproBot.sum.set()
-    # await state.update_data(crypto_bot_sum=float(message.text))
+    await CryproBot.sum.set()
+    await state.update_data(crypto_bot_sum=float(dollar_total_amount))
 
 
-# @dp.callback_query_handler(IsUser(), Text('crypto_bot'), state='*')
-# async def crypto_bot_pay(call: types.CallbackQuery):
-#     await call.message.edit_text(
-#         f'<b>{hlink("⚜️ CryptoBot", "https://t.me/CryptoBot")}</b>\n\n'
-#         '— Минимум: <b>0.1 $</b>\n\n'
-#         f'<b>💸 Введите сумму пополнения в долларах</b>',
-#         disable_web_page_preview=True,
-#         reply_markup=back_to_add_balance_kb
-#     )
-#     await CryproBot.sum.set()
-
-
-# @dp.message_handler(IsUser(), state=CryproBot.sum)
-# async def crypto_bot_sum(message: types.Message, state: FSMContext):
 @dp.callback_query_handler(IsUser(), Text('crypto_bot'), state=CryproBot.sum)
 async def crypto_bot_sum(call: types.CallbackQuery, state: FSMContext):
-    total_amount = 1000
+    async with state.proxy() as data:
+        total_amount = data['crypto_bot_sum']
+    await call.message.delete()
     await call.message.answer(
         f'<b>{hlink("⚜️ CryptoBot", "https://t.me/CryptoBot")}</b>\n\n'
         f'— Сумма: <b>{total_amount} $</b>\n\n'
@@ -257,8 +262,8 @@ async def crypto_bot_sum(call: types.CallbackQuery, state: FSMContext):
         disable_web_page_preview=True,
         reply_markup=crypto_bot_currencies_kb()
     )
-    await state.update_data(crypto_bot_sum=float(total_amount))
     await CryproBot.currency.set()
+    await call.answer()
 
 
 @dp.callback_query_handler(IsUser(), Text(startswith='crypto_bot_currency'), state=CryproBot.currency)
@@ -297,9 +302,12 @@ async def check_crypto_bot(call: types.CallbackQuery):
                 '✅ Оплата прошла успешно!',
                 show_alert=True
             )
+            cid = call.message.chat.id
+            db.query('DELETE FROM cart WHERE cid=?', (cid,))
+            db.query('UPDATE orders SET is_payed=True WHERE cid=?', (cid,))
             await call.message.delete()
             await call.message.answer(
-                f'<b>💸 Ваш баланс пополнен на сумму {payment[1]} $!</b>'
+                f'<b>💸 Ваш заказ на сумму {payment[1]} $ оплачен! Ждите доставку!</b>'
             )
 
             for admin in ADMINS:

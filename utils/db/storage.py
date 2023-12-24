@@ -16,7 +16,7 @@ class DatabaseManager:
             'body text, photo blob, price int, tag text)')
         self.query(
             'CREATE TABLE IF NOT EXISTS orders (cid int, usr_name text, '
-            'usr_address text, products text)')
+            'usr_address text, products text, is_payed boolean, total_sum float)')
         self.query(
             'CREATE TABLE IF NOT EXISTS cart (cid int, idx text, '
             'quantity int)')
